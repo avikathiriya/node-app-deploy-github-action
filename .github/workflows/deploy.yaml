@@ -18,66 +18,80 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+  steps:
+  - name: Checkout repository 
+    uses: actions/checkout@v4
 
-      - name: Validate SSH secrets
-        shell: bash
-        env:
-          SSH_KEY: ${{ secrets.SSH_KEY }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-        run: |
-          if [[ -z "$SSH_KEY" ]]; then
-            echo "::error::SSH_KEY secret is missing"
-            exit 1
+  - name: Validate SSH secrets
+    shell: bash
+    env:
+      SSH_KEY: ${{ secrets.SSH_KEY }}
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+    run: |
+      if [[ -z "$SSH_KEY" ]]; then
+        echo "::error::SSH_KEY secret is missing"
+        exit 1
+      fi
+
+      if [[ -z "$SSH_HOST" ]]; then
+        echo "::error::SSH_HOST secret is missing"
+        exit 1
+      fi
+
+      if [[ "$SSH_KEY" != *"PRIVATE KEY-----"* ]]; then
+        echo "::error::SSH_KEY does not appear to contain a private key. Store the complete private key file contents in this secret."
+        exit 1
+      fi
+
+  - name: Deploy to EC2
+    uses: appleboy/ssh-action@v1.0.3
+    with:
+      host: ${{ secrets.SSH_HOST }}
+      username: ubuntu
+      key: ${{ secrets.SSH_KEY }}
+      port: 22
+      timeout: 30s
+      command_timeout: 10m
+      script_stop: true
+      script: |
+        set -eu
+
+        cd /home/ubuntu/node-app-deploy-github-action
+
+        echo "===== Fetch latest code ====="
+        git fetch origin main
+        git reset --hard origin/main
+        git log -1 --oneline
+
+        echo "===== Verify application source ====="
+        grep -n "Hello from the server" index.js
+
+        echo "===== Build Docker image ====="
+        docker compose build --pull
+
+        echo "===== Restart application ====="
+        docker compose up -d --force-recreate
+
+        echo "===== Container status ====="
+        docker compose ps
+
+        echo "===== Verify HTTP response ====="
+        success=0
+
+        for attempt in $(seq 1 15); do
+          if response="$(curl --connect-timeout 2 --max-time 5 --fail --silent http://127.0.0.1:8080/ 2>/dev/null)"; then
+            echo "$response"
+            success=1
+            break
           fi
+          sleep 2
+        done
 
-          if [[ -z "$SSH_HOST" ]]; then
-            echo "::error::SSH_HOST secret is missing"
-            exit 1
-          fi
+        if [ "$success" -ne 1 ]; then
+          echo "ERROR: Application health check failed."
+          docker compose ps
+          docker compose logs --tail=100
+          exit 1
+        fi
 
-      - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ubuntu
-          key: ${{ secrets.SSH_KEY }}
-          port: 22
-          timeout: 30s
-          command_timeout: 10m
-          script: |
-            set -eu
-            cd /home/ubuntu/node-app-deploy-github-action
-
-            echo "===== Update source from GitHub ====="
-            git fetch origin main
-            git reset --hard origin/main
-            git log -1 --oneline
-
-            echo "===== Verify application source ====="
-            grep -n "Hello from the server" index.js
-
-            echo "===== Build Docker image ====="
-            docker compose build --pull
-
-            echo "===== Restart application ====="
-            docker compose up -d --force-recreate
-
-            echo "===== Show container status ====="
-            docker compose ps
-
-            echo "===== Verify HTTP response ====="
-            for attempt in $(seq 1 15); do
-              if response="$(curl --fail --silent --show-error http://localhost:8080/ 2>/dev/null)"; then
-                echo "$response"
-                echo "Deployment successful"
-                exit 0
-              fi
-              sleep 2
-            done
-
-            echo "::error::Application did not respond successfully on port 8080"
-            docker compose logs --tail=100
-            exit 1
+        echo "Deployment completed successfully."
