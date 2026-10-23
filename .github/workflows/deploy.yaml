@@ -1,4 +1,3 @@
-
 name: Node.js Docker CI/CD
 
 on:
@@ -10,35 +9,36 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check SSH secrets are available
+      - name: Validate SSH secrets
         shell: bash
         env:
           SSH_KEY: ${{ secrets.SSH_KEY }}
           SSH_HOST: ${{ secrets.SSH_HOST }}
         run: |
-          if [[ -n "$SSH_KEY" ]]; then
-            echo "SSH_KEY is present"
-          else
-            echo "::error::SSH_KEY is EMPTY or unavailable. Check repository Actions secrets."
+          if [[ -z "$SSH_KEY" ]]; then
+            echo "::error::SSH_KEY secret is missing"
             exit 1
           fi
 
-          if [[ -n "$SSH_HOST" ]]; then
-            echo "SSH_HOST is present"
-          else
-            echo "::error::SSH_HOST is EMPTY or unavailable. Check repository Actions secrets."
+          if [[ -z "$SSH_HOST" ]]; then
+            echo "::error::SSH_HOST secret is missing"
             exit 1
           fi
 
-      - name: Deploy via SSH
+      - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -48,25 +48,36 @@ jobs:
           timeout: 30s
           command_timeout: 10m
           script: |
-            set -e
-
+            set -eu
             cd /home/ubuntu/node-app-deploy-github-action
 
-            echo "===== Current Git Commit ====="
+            echo "===== Update source from GitHub ====="
             git fetch origin main
             git reset --hard origin/main
             git log -1 --oneline
 
-            echo "===== Verify Updated Source ====="
-            grep -n "Hello from the server" .
+            echo "===== Verify application source ====="
+            grep -n "Hello from the server" index.js
 
-            echo "===== Rebuild and Restart Containers ====="
-            docker compose down
-            docker compose build --no-cache
+            echo "===== Build Docker image ====="
+            docker compose build --pull
+
+            echo "===== Restart application ====="
             docker compose up -d --force-recreate
 
-            echo "===== Running Containers ====="
+            echo "===== Show container status ====="
             docker compose ps
 
-            echo "===== Container Logs ====="
-            docker compose logs --tail=50
+            echo "===== Verify HTTP response ====="
+            for attempt in $(seq 1 15); do
+              if response="$(curl --fail --silent --show-error http://localhost:8080/ 2>/dev/null)"; then
+                echo "$response"
+                echo "Deployment successful"
+                exit 0
+              fi
+              sleep 2
+            done
+
+            echo "::error::Application did not respond successfully on port 8080"
+            docker compose logs --tail=100
+            exit 1
