@@ -18,12 +18,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Check SSH secrets are available
+        shell: bash
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          if [[ -n "$SSH_KEY" ]]; then
+            echo "SSH_KEY is present"
+          else
+            echo "::error::SSH_KEY is EMPTY or unavailable. Check repository Actions secrets."
+            exit 1
+          fi
+
+          if [[ -n "$SSH_HOST" ]]; then
+            echo "SSH_HOST is present"
+          else
+            echo "::error::SSH_HOST is EMPTY or unavailable. Check repository Actions secrets."
+            exit 1
+          fi
+
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ubuntu
           key: ${{ secrets.SSH_KEY }}
+          port: 22
+          timeout: 30s
+          command_timeout: 10m
           script: |
             set -e
             cd /home/ubuntu/node-app-deploy-github-action
